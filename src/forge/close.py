@@ -246,6 +246,12 @@ def close(args: argparse.Namespace) -> int:
                            result.get("branch_diff") != branch_diff)
     if fresh:
         result.update(changed=changed, branch_diff=branch_diff)
+        # Keep the historical review commit unless replay removed it from this branch.
+        if (not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", str(result.get("commit", ""))) or
+                repo.run("git", "merge-base", "--is-ancestor", result["commit"],
+                         "HEAD", cwd=top).returncode != 0):
+            result["commit"] = repo.git("rev-parse", "HEAD", cwd=top)
+            refreshed = True
     if dismissals and not fresh:
         repo.refuse(REFUSALS["stale_dismiss"] if result else REFUSALS["bad_dismiss"], item=item)
     round_number = sum(step["step"] == "review" for step in state.get("steps", []))
