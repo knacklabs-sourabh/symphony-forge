@@ -488,10 +488,12 @@ def test_run(top: Path, command: str, base: str, *, always: bool = False,
             from forge import fasttest
 
             workers = machine.test_cpus()
-            # A worker's budget also caps a fixed xdist count; the option wins over the command's -n.
-            cap = (f" --maxprocesses={workers}" if os.environ.get("FORGE_TEST_CPUS")
-                   and fasttest.XDIST.search(command) else "")
+            # The machine budget also caps fixed xdist counts outside worker sessions.
+            cap = f" --maxprocesses={workers}" if fasttest.XDIST.search(command) else ""
+            with contextlib.chdir(top):
+                capped = fasttest.narrow_command(command, [], workers, [], launchers=False)
             env = {**os.environ, "FORGE_WORKER": "1",
+                   "FORGE_TEST_LANE": entry["id"],
                    "PYTEST_XDIST_AUTO_NUM_WORKERS": workers, "FORGE_TEST_CPUS": workers,
                    "PYTEST_ADDOPTS": f"{os.environ.get('PYTEST_ADDOPTS', '')} -rs{cap}".strip()}
             # Every pytest the command starts, the client's own or Forge's picker, loads Forge's
@@ -511,9 +513,9 @@ def test_run(top: Path, command: str, base: str, *, always: bool = False,
                 env["FORGE_WORKER_TESTS"] = "1"
             with repo.record_run(top, item, "test") as ran:
                 log = repo.forge_dir(top) / f"test-{ran['run_id']}.log"
-                entry.update(output_path=log.as_posix())
+                entry.update(output_path=log.as_posix(), test_cpus=int(workers))
                 with log.open("w", encoding="utf-8") as sink, subprocess.Popen(
-                                      command, shell=True, cwd=top, env=env, stdin=subprocess.DEVNULL,
+                                      capped, shell=True, cwd=top, env=env, stdin=subprocess.DEVNULL,
                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                       encoding="utf-8", errors="replace", **codex.GROUP) as process:
                     try:
