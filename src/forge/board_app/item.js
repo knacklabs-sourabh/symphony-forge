@@ -6,7 +6,7 @@ const { renderPlan } = await import(`./markdown.js${TOKEN}`);
 const STAGES = {
   working: 'Building', fixing: 'Building', building: 'Building', 'checks failed': 'Building',
   reviewing: 'Review', 'waiting for checks': 'Review', hotspot: 'Review',
-  ready: 'Ready', merged: 'Merged', done: 'Merged',
+  ready: 'Ready', 'ready to merge': 'Ready', merged: 'Merged', done: 'Merged',
 };
 const TONE = { Building: 'moving', Review: 'moving', Ready: 'ready', Merged: 'ready', Planned: 'waiting' };
 
@@ -23,6 +23,39 @@ function el(tag, attrs = {}, ...children) {
   }
   node.append(...children.flat().filter((child) => child !== null && child !== undefined && child !== false));
   return node;
+}
+
+let lostFocus = null; // the control a redraw removed before its copy loaded, such as a plan link
+
+// A control without a data-focus key is known by its tag, address and words.
+function focusKey(control) {
+  return control.dataset.focus || `${control.tagName} ${control.getAttribute('href')} ${control.textContent}`;
+}
+
+function refocus(node, key) {
+  const control = [...node.querySelectorAll('a, button, summary, [tabindex]')].find((one) => focusKey(one) === key);
+  if (!control) return false;
+  if (control.tagName !== 'SUMMARY') control.closest('details:not([open])')?.setAttribute('open', '');
+  control.focus({ preventScroll: true });
+  return true;
+}
+
+function replaceContent(node, ...children) {
+  const active = document.activeElement;
+  const key = active !== node && node.contains(active) ? focusKey(active) : null;
+  node.replaceChildren(...children);
+  if (key) lostFocus = refocus(node, key) ? null : { node, key };
+}
+
+function restoreLostFocus(part) {
+  if (!lostFocus || !lostFocus.node.contains(part) || document.activeElement !== document.body) return;
+  if (refocus(part, lostFocus.key)) lostFocus = null;
+}
+
+function recordedWords(value, fallback = 'See the recorded review for technical details.') {
+  const text = String(value || '');
+  return /\b(?:forge|git|uv|npm|npx|pnpm|yarn|python3?|node)\s+[\w-]|--[a-z]|`/i.test(text)
+    ? fallback : text || 'unknown';
 }
 
 function duration(seconds) {
@@ -83,13 +116,17 @@ function roundName(round) {
 }
 
 function roundWhat(round) {
-  return String(round.line || '').replace(/^Rounds? [^:]*:\s*/, '') || 'unknown';
+  const text = String(round.line || '').replace(/^Rounds? [^:]*:\s*/, '');
+  // Finding titles follow the measured summary. Keep that summary when a title
+  // contains terminal instructions, without exposing the instructions on the board.
+  return recordedWords(text, recordedWords(text.split(' — ')[0]));
 }
 
 function figures(row) {
   const count = row.findings?.count;
   return el('dl', { class: 'figures' },
-    [['review rounds', row.rounds ? row.rounds.length : row.round ?? 'unknown'],
+    [['review rounds', row.rounds ? row.rounds.reduce((total, round) => total
+      + (round.first != null && round.last != null ? round.last - round.first + 1 : 1), 0) : row.round ?? 'unknown'],
      ['known issues kept', issues(row).length],
      ['open findings', typeof count === 'number' ? count : 'unknown']]
       .map(([label, value]) => el('div', {}, el('dt', {}, label), el('dd', {}, String(value)))));
@@ -121,8 +158,9 @@ function roundList(row, limit) {
 }
 
 function partList(parts, current) {
-  return el('ul', { class: 'parts' }, parts.map((part) => el('li', {},
+  return el('ul', { class: 'part-list' }, parts.map((part) => el('li', {},
     el('button', { type: 'button', class: `part ${part.id === current ? 'current' : ''}`,
+                   'data-focus': `part-${part.id}`,
                    'aria-current': part.id === current ? 'true' : 'false', onclick: () => openDrawer(part.id) },
       el('span', {}, part.title), el('span', { class: `state ${TONE[stage(part)] || 'needs-you'}` }, stage(part))))));
 }
@@ -135,11 +173,11 @@ function drawerBody(row) {
   return [
     el('div', { class: 'head' },
       el('p', { class: 'kind' }, tag(row), el('span', {}, kind(row))),
-      el('button', { type: 'button', class: 'close', 'aria-label': 'Close', onclick: closeDrawer }, closeIcon()),
-      el('h2', { id: 'drawer-title', tabindex: '-1' }, row.title),
+      el('button', { type: 'button', class: 'close', 'aria-label': 'Close', 'data-focus': 'close', onclick: closeDrawer }, closeIcon()),
+      el('h2', { id: 'drawer-title', tabindex: '-1', 'data-focus': 'drawer-title' }, row.title),
       el('p', { class: 'who' }, el('span', { 'data-assign': row.id }, person(row)),
-        el('a', { href: `#item/${row.id}`, class: 'more' }, 'Full history')),
-      el('p', { class: 'state-line' }, [row.status, row.waits_on].filter(Boolean).join('. ') || 'Status unknown.')),
+        el('a', { href: `#item/${row.id}`, class: 'more', 'data-focus': 'history' }, 'Full history')),
+      el('p', { class: 'state-line' }, row.status || 'Status unknown.')),
     timeBar(row),
     el('section', { class: 'block' }, el('h3', {}, 'Rounds'), roundList(row, 4)),
     parts.length ? el('section', { class: 'block' }, el('h3', {}, row.kind === 'story' ? 'Its parts' : 'Its story’s parts'),
@@ -182,7 +220,7 @@ async function openDrawer(id) {
 
 function fillDrawer(row) {
   drawer.seen = JSON.stringify(row);
-  drawer.node.replaceChildren(...drawerBody(row));
+  replaceContent(drawer.node, ...drawerBody(row));
 }
 
 function closeDrawer(restore = true) {
@@ -235,17 +273,18 @@ async function showPage() {
 
 function fillPage() {
   const { row } = page;
+  const tabId = (name) => `tab-${name.replaceAll(' ', '-')}`;
   page.seen = JSON.stringify(rows().find((one) => one.id === row.id) || null);
   const tabs = ['Overview', ...(row.kind === 'story' ? ['Plan'] : []), 'Rounds', 'Known issues'];
   const kept = issues(row);
   page.node.querySelector('.crumbs [aria-current]').textContent = row.title;
   const tablist = el('div', { role: 'tablist', 'aria-label': row.title, class: 'tabs' }, tabs.map((name) => el('button', {
-    type: 'button', role: 'tab', id: `tab-${name}`, 'aria-controls': 'tab-panel', 'aria-selected': String(name === page.tab),
-    onclick: () => { page.tab = name; fillPage(); document.getElementById(`tab-${name}`).focus(); },
+    type: 'button', role: 'tab', id: tabId(name), 'data-focus': tabId(name), 'aria-controls': 'tab-panel', 'aria-selected': String(name === page.tab),
+    onclick: () => { page.tab = name; fillPage(); document.getElementById(tabId(name)).focus(); },
   }, name === 'Known issues' ? `Known issues · ${kept.length}` : name)));
-  const panel = el('section', { role: 'tabpanel', id: 'tab-panel', 'aria-labelledby': `tab-${page.tab}`, class: 'panel' });
+  const panel = el('section', { role: 'tabpanel', id: 'tab-panel', 'aria-labelledby': tabId(page.tab), class: 'panel' });
   panel.append(...{ Overview: overview, Plan: plan, Rounds: roundsTab, 'Known issues': knownIssues }[page.tab](row, panel));
-  page.node.replaceChildren(page.node.firstChild,
+  replaceContent(page.node, page.node.firstChild,
     el('div', { class: 'item-grid' },
       el('div', { class: 'summary' },
         el('p', { class: 'kind' }, tag(row), el('span', {}, kind(row))),
@@ -269,10 +308,12 @@ function overview(row) {
     el('section', { class: 'block' }, el('h2', {}, 'History'),
       el('dl', { class: 'facts' },
         fact('Started by', row.started_by), fact('Approved by', row.approved_by),
-        fact(row.merged_at ? 'Merged' : 'Merged by', row.merged_at ? `${day(row.merged_at)} by ${row.merged_by?.name || 'unknown'}` : row.merged_by ? row.merged_by.name : 'not yet'),
+        fact(row.merged_at ? 'Merged' : 'Merged by', row.merged_at ? `${day(row.merged_at)} by ${row.merged_by?.name || 'unknown'}`
+          : row.merged_by?.name || (['merged', 'done'].includes(row.stage) ? 'unknown' : 'not yet')),
         pr ? el('div', {}, el('dt', {}, 'Pull request'), el('dd', {}, pr)) : null),
       history.length ? el('ol', { class: 'events' }, history.slice().reverse().map((event) =>
-        el('li', {}, el('time', { datetime: event.time }, day(event.time)), el('span', {}, event.line)))) : null),
+        el('li', {}, el('time', { datetime: event.time }, day(event.time)),
+          el('span', {}, recordedWords(event.line, 'A worker asked a technical question.'))))) : null),
     timeBar(row),
     row.took?.length ? el('section', { class: 'block' }, el('h2', {}, 'How long each step took'),
       el('ul', { class: 'took-list' }, row.took.map((line) => el('li', {}, line)))) : null,
@@ -284,7 +325,7 @@ function plan(row, panel) {
   fetch(`plan/${encodeURIComponent(row.id)}${TOKEN}`, { cache: 'no-store' })
     .then(async (answer) => {
       const text = await answer.text();
-      if (answer.ok) return doc.replaceChildren(renderPlan(text));
+      if (answer.ok) return doc.replaceChildren(renderPlan(text)), restoreLostFocus(doc);
       let reason = 'The board could not read the plan. Open the tab again in a moment.';
       try {
         reason = JSON.parse(text).error;
@@ -314,7 +355,8 @@ function knownIssues(row) {
   const byFile = Map.groupBy(kept, (issue) => issue.file || 'No file named');
   return [...byFile].map(([file, list]) => el('section', { class: 'block' }, el('h2', { class: 'file' }, file),
     el('ul', { class: 'issues' }, list.map((issue) => el('li', {},
-      el('span', {}, issue.title), el('span', { class: 'quiet' }, [issue.kept, issue.reason].filter(Boolean).join(': ') || 'unknown'))))));
+      el('span', {}, recordedWords(issue.title)), el('span', { class: 'quiet' },
+        recordedWords([issue.kept, issue.reason].filter(Boolean).join(': '), 'The review kept this problem for later.')))))));
 }
 
 function closePage() {

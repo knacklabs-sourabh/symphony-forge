@@ -1,6 +1,9 @@
 /* An item's drawer and full page, from the approved Drawer and Item artboards (docs/board-design). */
 
-.drawer {
+/* Scoped so these short class names never restyle the other screens. */
+@scope (.drawer, .item-page) {
+
+&.drawer {
   position: fixed;
   top: 48px;
   right: 0;
@@ -15,18 +18,18 @@
   border-left: 1px solid var(--line);
   background: var(--surface);
   box-shadow: -12px 0 32px rgb(21 23 26 / 0.10);
-  transition: translate 200ms var(--ease-out), opacity 200ms var(--ease-out);
-  @starting-style { translate: 24px 0; opacity: 0; }
+  transition: translate 200ms var(--ease-out);
+  @starting-style { translate: 24px 0; }
 }
 
-.drawer .head {
+&.drawer .head {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: var(--space-2);
 }
 
-.drawer .head > :not(.kind, .close) { grid-column: 1 / -1; }
-.drawer h2:focus { outline: none; }
+&.drawer .head > :not(.kind, .close) { grid-column: 1 / -1; }
+&.drawer h2:focus { outline: none; }
 
 .kind {
   margin: 0;
@@ -65,7 +68,7 @@
 
 .close svg { width: 16px; height: 16px; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; }
 
-.drawer h2, .item-page h1 {
+&.drawer h2, &.item-page h1 {
   margin: 0;
   font-size: var(--size-title);
   line-height: 30px;
@@ -134,7 +137,7 @@
 
 .legend .for-you { color: var(--needs-you); }
 
-.rounds, .parts, .events, .issues, .took-list {
+.rounds, .part-list, .events, .issues, .took-list {
   margin: 0;
   padding: 0;
   list-style: none;
@@ -152,7 +155,7 @@
 
 .rounds .what strong { font-weight: 600; }
 
-.drawer .rounds .what {
+&.drawer .rounds .what {
   overflow: hidden;
   white-space: nowrap;
   text-overflow: ellipsis;
@@ -219,7 +222,7 @@
 
 /* The full page */
 
-.item-page {
+&.item-page {
   flex: 1;
   min-height: 0;
   display: flex;
@@ -344,3 +347,5 @@
 
 .plan details[open] > * + * { margin-top: var(--space-4); }
 .plan summary { font-size: var(--size-body); font-weight: 600; color: var(--ink-2); cursor: pointer; }
+
+}
