@@ -74,6 +74,8 @@ $delegation
   restore uses the incoming side while a merge is open. Workers can commit those incoming settings
   unchanged. Initial migration and adoption keep their new settings until their first pull request merges.
 - A subagent never runs `forge handback`, `forge work` or `forge stop` itself.
+- A successful hand-back frees the item's lock. If the worker process and lock are no longer live,
+  the board and `forge next` show the worker as stopped and give `forge work <item>` for an unfinished round.
 - Never run `forge stop`: only a person can stop a run, after confirmation in the host.
 - Only the human decides to drop a fix. Leave `forge fix drop <fix> --because "<reason>"`
   to the coordinator after a clear yes. `forge fix drop <fix> --undo` restores it; a restored
