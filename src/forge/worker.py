@@ -51,6 +51,8 @@ COMMIT_NUDGE = ("Your turn ended with changes left uncommitted, so the review ca
                 "your turn only once nothing is left uncommitted.\n")
 
 REFUSALS = {
+    "merged": ("The pull request for {item} is already merged. Start a new fix for follow-up work.",
+               'forge fix start "<why>" --done "<done when>"'),
     "no_checkout": ("{item} has no checkout here, so it hasn't been started.", "forge next"),
     "merge": ("Resolve the merge conflicts, if any, in {top}, then commit the merge.",
               "forge work {item}"),
@@ -76,6 +78,11 @@ def checkout(item: str) -> tuple[re.Match[str], Path]:
     if not match or not (match["task"] or match["fix"]):
         refuse(repo.REFUSALS["bad_item"], item=item)
     branches = [f"task/{match['key']}-{match['task']}"] if match["task"] else [f"fix/{item}", f"forge/{item}"]
+    top = repo.root()
+    default = repo.default_branch(top)
+    git("fetch", "-q", "origin", default, cwd=top)
+    if task._merged(f"origin/{default}", item, top):
+        refuse(REFUSALS["merged"], item=item)
     trees = story.worktrees(Path.cwd())
     top = next((trees[branch] for branch in branches if branch in trees), None)
     if top is None:
@@ -98,7 +105,6 @@ def prepare(item: str) -> tuple[re.Match[str], Path, str]:
         default = repo.default_branch(top)
         first = ""
         with codex.hold(top, item, "Build"):
-            git("fetch", "-q", "origin", default, cwd=top)
             merged = repo.run("git", "merge", "-q", "--no-edit", f"origin/{default}", cwd=top)
             if merged.returncode:
                 if not git("diff", "--name-only", "--diff-filter=U", cwd=top):
