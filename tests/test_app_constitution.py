@@ -10,11 +10,12 @@ from pathlib import Path
 import pytest
 
 from conftest import FORGE_SHIM, ROOT, _install
-from test_close import env  # noqa: F401
+from test_close import CLEAN, GREEN, STORY_DOC, blocked, env  # noqa: F401
 from test_merge_command import _merge_at_github, _ready
 from test_proto_signoff import _decision
 from test_setup import _fresh_client
-from test_story import DOC, setup, worktree
+from test_score_notes import _client_repo as setup_client, _scored
+from test_story import DESIGN_IMAGE, DOC, READER, new_story, setup, worktree
 from test_tools_session_hold import Session
 
 STORY = "FORGE-CONSTITUTION-1"
@@ -372,6 +373,127 @@ def test_2_the_constitution_is_approved_only_when_complete(repo, tmp_path, gh, a
     assert accepted.returncode == 0, accepted.stdout + accepted.stderr
     assert "Accepted docs/decisions/" in accepted.stdout
     assert "status: accepted" in app_record.read_text("utf-8")
+
+
+@pytest.mark.parametrize("adopted,case", [
+    (False, "fix"), (True, "fix"), (False, "part"), (False, "documents"),
+    (False, "proposed"), (False, "absent"), (False, "read"), (False, "read later"),
+])
+def test_3_reviews_and_reads_hold_work_against_the_constitution(env, tmp_path, monkeypatch, adopted, case):
+    # Commands own prompt selection and verdicts; only external readers are faked.
+    # Previously low model scores let constitution violations pass.
+    setup_client(env, tmp_path, adopted)
+    env.checks(GREEN)  # Init's branch-protection replies are not CI check results.
+    repo = env.repo
+    constitution = (repo.path / "docs/product/CONSTITUTION.md").read_text("utf-8")
+    record = next(repo.path.glob("docs/decisions/*-app-constitution.md"))
+
+    def approval(accepted):
+        text = record.read_text("utf-8")
+        record.write_text(re.sub(r"status: (accepted|proposed)",
+                                 "status: accepted" if accepted else "status: proposed", text),
+                          encoding="utf-8")
+        repo.git("add", "-A")
+        _fixture_git(repo, tmp_path, "commit", "-qm", "Change constitution approval")
+        _fixture_git(repo, tmp_path, "push", "-q", "origin", "main")
+
+    if case.startswith("read"):
+        _install(repo.bin, "claude", READER.format(python=sys.executable))
+        shop = new_story(repo, "SHOP")
+        (shop / "plans/SHOP.md").write_text(DOC, encoding="utf-8")
+        if case == "read later":
+            approval(False)
+            (repo.bin / "claude-says.md").write_text(
+                "1. Blocking: The storage task is missing.\n   Gain 4, Work 1, Harm 1\n",
+                encoding="utf-8")
+            first = repo.forge("read", "SHOP")
+            assert first.returncode == 0, first.stdout + first.stderr
+            call = json.loads((repo.bin / "claude-calls.jsonl").read_text("utf-8").splitlines()[-1])
+            assert "This app's approved constitution" not in call["prompt"]
+            notes = shop / "plans/SHOP.read.md"
+            notes.write_text(notes.read_text("utf-8") + "\n   Disposition: cut - storage task added\n",
+                             encoding="utf-8")
+            approval(True)
+        number = 2 if case == "read later" else 1
+        label = "Advisory" if case == "read later" else "Blocking"
+        (repo.bin / "claude-says.md").write_text(
+            f"{number}. {label}: Constitution: The plan adds MySQL\n"
+            "   The approved storage choice requires Postgres.\n   Gain 2, Work 1, Harm 1\n"
+            f"{number + 1}. Advisory: Constitution: A rare storage path adds MySQL\n"
+            "   Case: rare\n   Gain 2, Work 1, Harm 1\n", encoding="utf-8")
+        read = repo.forge("read", "SHOP")
+        assert read.returncode == (1 if case == "read later" else 0), read.stdout + read.stderr
+        if case == "read later":
+            assert "Round 2 of the cold read of SHOP stopped with open notes" in read.stderr
+        prompt = json.loads((repo.bin / "claude-calls.jsonl").read_text("utf-8").splitlines()[-1])["prompt"]
+        assert ("This app's approved constitution, from the default branch, follows. In any round, "
+                "report a plan that goes against it as a note titled "
+                "`Constitution: <the line it breaks>`; this is not limited to P0.") in prompt
+        assert constitution in prompt
+        notes = (shop / "plans/SHOP.read.md").read_text("utf-8")
+        assert "passed: no\n" in notes
+        held = notes.split(f"{number}. {label}: Constitution:", 1)[1].split(f"{number + 1}.", 1)[0]
+        assert "Gain 4, Work 1, Harm 1 (floor: constitution)" in held
+        assert "below the bar" not in held
+        assert "Disposition: keep - below the bar (follow-up)" in notes
+        next_step = repo.forge("next").stdout
+        assert ("Constitution: The plan adds MySQL" if case == "read later"
+                else f"give finding {number}") in next_step
+        return
+
+    if case in {"proposed", "absent"}:
+        approval(False)
+        if case == "absent":
+            record.unlink()
+            repo.git("add", "-A")
+            _fixture_git(repo, tmp_path, "commit", "-qm", "Remove constitution approval")
+            _fixture_git(repo, tmp_path, "push", "-q", "origin", "main")
+    path = "docs/storage.md" if case == "documents" else "app.py"
+    if case == "part":
+        repo.write("plans/SHOP.md", STORY_DOC)
+        repo.write("docs/design/baskets/screen.svg", DESIGN_IMAGE)
+        repo.git("add", "plans/SHOP.md", "docs/design/baskets/screen.svg")
+        _fixture_git(repo, tmp_path, "commit", "-qm", "Record the existing story")
+        _fixture_git(repo, tmp_path, "push", "-q", "origin", "main")
+        item, where = env.start_task()
+    else:
+        item, where = env.start_fix(changes={path: "Use MySQL instead of Postgres.\n"})
+    if case == "fix":
+        env.commit(where, "docs/product/CONSTITUTION.md", "# Branch-only constitution: use MySQL\n")
+    env.reviews(blocked(_scored("P1", "Constitution: The app uses Postgres",
+                               "Gain 3, Work 4, Harm 1\nThe change uses MySQL.", path)))
+    if case in {"proposed", "absent"}:
+        env.reviews(CLEAN)
+    trace = tmp_path / "review-git-packets.txt"
+    with monkeypatch.context() as tracing:
+        tracing.setenv("GIT_TRACE_PACKET", trace.as_posix())
+        closed = env.close(item)
+    assert env.review_calls(), closed.stdout + closed.stderr
+    if case == "fix":
+        # The review snapshot must use Git's transport while sibling work can
+        # repack the source object store. A local filesystem copy races that work.
+        assert re.search(r"\bclone>\s+want [0-9a-f]+", trace.read_text("utf-8"))
+    prompt = env.prompt()
+    if case in {"proposed", "absent"}:
+        assert "## This app's constitution" not in prompt
+        assert closed.returncode == 0, closed.stdout + closed.stderr
+        return
+    assert "## This app's constitution" in prompt
+    assert ("The app's approved constitution, on the default branch, follows. Report work that goes "
+            "against it as a finding titled `Constitution: <the line it breaks>`, quoting the line. "
+            "Where it differs from Forge's convention pages, it wins.") in prompt
+    assert constitution in prompt
+    assert "Branch-only constitution" not in prompt
+    assert "Gain 4, Work 2, Harm 1 (floor: constitution)" in closed.stdout
+    if case == "documents":
+        assert closed.returncode == 0, closed.stdout + closed.stderr
+    else:
+        assert closed.returncode == 1, closed.stdout + closed.stderr
+        if case == "part":
+            assert "The review left serious findings open" in closed.stderr
+        else:
+            assert "reached the round limit with open findings" in closed.stderr
+            assert "Constitution: The app uses Postgres" in closed.stderr
 
 
 @pytest.mark.parametrize("adoption", ["new init", "previous release upgrade and sync"])

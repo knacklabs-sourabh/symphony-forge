@@ -831,7 +831,10 @@ def _sweep() -> None:
     for folder in Path(tempfile.gettempdir()).glob("forge-review-*"):
         with contextlib.suppress(OSError):
             if folder.is_dir() and folder.stat().st_mtime < day_ago:
-                shutil.rmtree(folder, ignore_errors=True)
+                # tempfile's cleanup also handles read-only Git objects on Windows.
+                with tempfile.TemporaryDirectory(prefix="forge-review-", dir=folder.parent,
+                                                 ignore_cleanup_errors=True) as trash:
+                    folder.rename(Path(trash) / "leftover")
 
 
 def round_number(top: Path, item: str, state: dict[str, Any]) -> int | None:
@@ -858,11 +861,14 @@ def run(top: Path, item: str, state: dict[str, Any], cfg: dict[str, Any],
         signoff_prompt: str = "", light: bool = False, tested: str = "") -> dict[str, Any]:
     """Review the branch head once, retrying once when a run doesn't finish. Returns the result."""
     prompt = signoff_prompt or instructions(top, item, state, cfg, base, previous, tested)
-    from forge import story  # story imports review indirectly
+    from forge import records, story  # story imports review indirectly
     block = (Path(__file__).parent / "templates" / "review.md").read_text(encoding="utf-8")
     if rules := story.agents_section(top, "Review rules"):
         own = block.split("<!-- review-rules -->\n", 1)[1].split("\n<!-- ", 1)[0]
         prompt += "\n\n" + string.Template(own.strip()).substitute(review_rules=rules)
+    if constitution := records.constitution(top):
+        own = block.split("<!-- constitution -->\n", 1)[1].split("\n<!-- ", 1)[0]
+        prompt += "\n\n" + string.Template(own.strip()).substitute(constitution=constitution)
     head = repo.git("rev-parse", "HEAD", cwd=top)
     product = ([name for name in repo.git("ls-files", "-z", f"--with-tree={head}", cwd=top).split("\0")
                 if name and not name.startswith((*BOOKKEEPING, "docs/decisions/"))]
@@ -873,8 +879,8 @@ def run(top: Path, item: str, state: dict[str, Any], cfg: dict[str, Any],
         tree, out = tmp / "tree", tmp / "review.json"
         saved = repo.forge_dir(top) / f"review-{item.replace('/', '-')}.json"
         saved.unlink(missing_ok=True)
-        # A local clone keeps Git history inside the reviewer's read-only sandbox.
-        repo.git("clone", "-q", "--no-hardlinks", "--no-checkout", str(top), str(tree), cwd=top)
+        # Git's transport avoids copying an object store while another close changes it.
+        repo.git("clone", "-q", "--no-local", "--no-checkout", str(top), str(tree), cwd=top)
         repo.git("checkout", "-q", "--detach", head, cwd=tree)
         if signoff_prompt:
             repo.git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--",
@@ -885,8 +891,10 @@ def run(top: Path, item: str, state: dict[str, Any], cfg: dict[str, Any],
                                 "-m", "Product snapshot for sign-off", cwd=tree)
             repo.git("checkout", "-q", "-f", "--detach", snapshot, cwd=tree)
         else:
+            # A replay can leave the recorded review commit outside every advertised ref.
             repo.git("fetch", "-q", str(top),
-                     f"+refs/remotes/{base}:refs/remotes/{base}", cwd=tree)
+                     f"+refs/remotes/{base}:refs/remotes/{base}",
+                     *([previous["commit"]] if previous.get("commit") else []), cwd=tree)
             review_base = previous.get("commit") or repo.git("rev-parse", base, cwd=tree)
             if previous.get("commit"):
                 merged_base = repo.git("merge-base", base, "HEAD", cwd=tree)
