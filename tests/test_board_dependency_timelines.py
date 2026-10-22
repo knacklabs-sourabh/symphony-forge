@@ -3,13 +3,14 @@ import json
 import re
 import shutil
 import sys
+import tomllib
 
 import pytest
 
 from conftest import ROOT, _install
 from test_board import DOC
 from test_fix_new_repos_get_claude_as_their_worker_by import _new_repo
-from test_story import GRILL, READER, claude_plan, hook, new_story, ready, worktree
+from test_story import GRILL, READER, approved_constitution, claude_plan, hook, new_story, ready, worktree
 
 STORY = "FIX-BOARD-VISUALS"
 
@@ -49,6 +50,8 @@ def _client(repo, gh, tmp_path, history):
         repo.git("switch", "-q", "main")
         repo.git("merge", "-q", "--ff-only", "fix/upgrade-client")
         _land_fixture(repo)
+        if tomllib.loads((repo.path / "forge.toml").read_text("utf-8")).get("stage", "live") != "prototype":
+            approved_constitution(repo)
 
 
 def _configured(repo, gh, tmp_path, history, keys):
@@ -68,6 +71,8 @@ def _configured(repo, gh, tmp_path, history, keys):
     repo.path = main
     repo.git("merge", "-q", "--ff-only", "fix/configure-client")
     _land_fixture(repo)
+    if not (repo.path / "docs/product/CONSTITUTION.md").exists():
+        approved_constitution(repo)
 
 
 # ponytail: about 25 forge commands; on a loaded Windows runner they need more than the 300 s CI default.
