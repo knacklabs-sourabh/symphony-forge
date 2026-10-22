@@ -16,7 +16,7 @@ from pathlib import Path
 from string import Template
 from typing import Any
 
-from forge import claude_sdk, codex, doctor, machine, native, repo, score, story, task
+from forge import claude_sdk, codex, doctor, machine, native, repo, story, task
 from forge.repo import git, refuse
 
 HERE = Path(__file__).parent
@@ -120,7 +120,7 @@ def _work(args: argparse.Namespace) -> bool:
     repo.command_fact("prepared work", top, dict).pop(item)
     config = repo.config(top)  # the item's own forge.toml, not the caller's
     state = repo.read_state(item, top) or {}
-    from forge import close, nextstep, time_records  # close imports story, which imports this module
+    from forge import close, nextstep, review, time_records  # close imports story, which imports this module
     # GitHub is read only when this round answers or ends a wait on a person, never just to queue.
     asking = note is not None or codex.record(top, item).get("question") or time_records.pending_merge_wait(top, item)
     pr = close.branch_pr(top, state) if asking else None
@@ -216,6 +216,7 @@ def _work(args: argparse.Namespace) -> bool:
             elif not on_codex and previous:
                 fresh = "Forge has no record of its Claude session on this machine"
         state = repo.read_state(item, top) or {}
+        review.bound_review(top, item, state, state.get("review") or {})
         findings, failing = _fix_round(state)
         stop = state.get("stop") or {}
         if note is None and stop.get("by") == "owner" and stop.get("worker_round") == state.get("round"):
@@ -469,11 +470,12 @@ def _fix_round(state: dict[str, Any]) -> tuple[list[dict[str, Any]], list[tuple[
     """The open findings at the bar and the failing checks, close's own test run among them, once
     close has run."""
     tests = [("Tests on the close run", state["tests"])] if state.get("tests") else []
-    review = state.get("review")
-    if not review:  # no review yet: no pull request to read checks from
+    result = state.get("review")
+    if not result:  # no review yet: no pull request to read checks from
         return [], tests
-    findings = [finding for finding in score.open_findings(review)
-                if score.holds(finding, review.get("blocking_level"))]
+    from forge import review
+
+    findings = [finding for _, finding in review.blocking(result)]
     return findings, tests + _failing(state.get("branch", ""))
 
 
