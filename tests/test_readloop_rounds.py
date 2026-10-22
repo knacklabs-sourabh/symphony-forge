@@ -199,6 +199,13 @@ class Reader:
     def read(self):
         return (self.native if self.coordinator == self.app else self.repo.forge)("read", "SHOP")
 
+    def resolve(self, choice: str, reason: str):
+        return (self.native if self.coordinator == self.app else self.repo.forge)(
+            "read", "SHOP", "--resolve", choice, "--reason", reason)
+
+    def accept(self, reason: str):
+        return self.resolve("accept", reason)
+
     def ok(self, text: str = "No findings.\n") -> str:
         self.say(text)
         done = self.read()
@@ -330,7 +337,11 @@ def _continues(repo, monkeypatch, tmp_path, sdk_data, app):  # noqa: F811
     brief.write_text("# Brief\n\n## Answers\n\n- Hosting: the client's own servers\n", encoding="utf-8")
 
     # The reader restarts its numbering at 1; Forge numbers it after round 1's findings.
-    reader.ok("1. Disputed keep 1: shoppers without an account lose baskets too.\n")
+    reader.say("1. Disputed keep 1: shoppers without an account lose baskets too.\n")
+    stopped = reader.read()
+    assert stopped.returncode == 1 and "asks the owner" in stopped.stderr, stopped.stdout + stopped.stderr
+    resolved = reader.resolve("more", "the owner wants one more read")
+    assert resolved.returncode == 0, resolved.stdout + resolved.stderr
     assert reader.continued()
     prompt = reader.prompt()
     flat = _flat(prompt)
@@ -394,7 +405,12 @@ def _starts_fresh(repo, monkeypatch, tmp_path, sdk_data, app):  # noqa: F811
     def fresh(why: str, says: str = "No findings.\n") -> str:
         """A round that starts a new conversation with the first round's instructions, the whole
         doc and every earlier finding with its disposition, and says why."""
-        out = reader.ok(says)
+        reader.say(says)
+        stopped = reader.read()
+        assert stopped.returncode == 1 and "asks the owner" in stopped.stderr, stopped.stdout + stopped.stderr
+        out = stopped.stdout + stopped.stderr
+        accepted = reader.accept("the owner accepts the tax note")
+        assert accepted.returncode == 0, accepted.stdout + accepted.stderr
         assert FRESH[app].format(why) in out, out
         assert not reader.continued()
         prompt = reader.prompt()
@@ -403,8 +419,16 @@ def _starts_fresh(repo, monkeypatch, tmp_path, sdk_data, app):  # noqa: F811
             assert sent in prompt, sent
         return prompt
 
-    def continued(says="No findings.\n"):
-        out = reader.ok(says)
+    def continued(says="No findings.\n", accept_reason=None):
+        if accept_reason is None:
+            out = reader.ok(says)
+        else:
+            reader.say(says)
+            stopped = reader.read()
+            assert stopped.returncode == 1 and "asks the owner" in stopped.stderr, stopped.stdout + stopped.stderr
+            out = stopped.stdout + stopped.stderr
+            accepted = reader.accept(accept_reason)
+            assert accepted.returncode == 0, accepted.stdout + accepted.stderr
         assert "Starting a new" not in out
         assert reader.continued()
         return reader.prompt()
@@ -421,11 +445,10 @@ def _starts_fresh(repo, monkeypatch, tmp_path, sdk_data, app):  # noqa: F811
     assert reader.text() == notes
     reader.fail(False)
     # A reply with no numbered finding becomes one, numbered after the earlier rounds'.
-    prompt = continued("The totals are unclear.\n")
+    prompt = continued("The totals are unclear.\n", "the owner accepts the unclear totals")
     assert "Round 2 of your cold read" in prompt and "a numbered list starting at 2" in _flat(prompt)
     assert "## Round 2\n\n2. The totals are unclear.\n" in reader.text()
-    assert "passed: yes" in reader.text()
-    assert "Disposition: keep - Left open after round two" in reader.text()
+    assert "Disposition: keep - the owner accepts the unclear totals" in reader.text()
 
     # A discarded round too.
     notes = reader.text()
@@ -443,7 +466,7 @@ def _starts_fresh(repo, monkeypatch, tmp_path, sdk_data, app):  # noqa: F811
     reader.lose()
     fresh("Codex couldn't resume its conversation: no rollout found for thread id thr-stub-1" if app == "codex"
           else f"Claude couldn't continue session {session}", "3. Totals need tax.\n")
-    assert "Disposition: keep - Left open after round two" in reader.text()
+    assert "Disposition: keep - the owner accepts the tax note" in reader.text()
 
     # Notes written before rounds: no round number and no copy of what was read. That is round 1,
     # and the next round starts fresh with no diff.
@@ -493,14 +516,19 @@ def _stays_pinned(repo, monkeypatch, tmp_path, sdk_data, app):  # noqa: F811
     assert "reader: codex (gpt-6-sol), a subagent of this Codex session" in reader.text()
 
 
-def _native_round(reader, text="No findings."):
+def _native_round(reader, text="No findings.", resolve=None):
     offered = reader.native("read", "SHOP")
     assert offered.returncode == 0, offered.stdout + offered.stderr
     native = json.loads(offered.stdout)
     assert native["role"] == "reader" and native["tool"] == reader.app
     finished = reader.native("handback", "SHOP", "--round", str(native["round"]),
                              "--subagent", "readloop-reader", "--text", text)
-    assert finished.returncode == 0, finished.stdout + finished.stderr
+    if resolve is None:
+        assert finished.returncode == 0, finished.stdout + finished.stderr
+    else:
+        assert finished.returncode == 1 and "asks the owner" in finished.stderr, finished.stdout + finished.stderr
+        resolved = reader.resolve(*resolve)
+        assert resolved.returncode == 0, resolved.stdout + resolved.stderr
     return native
 
 
@@ -523,7 +551,7 @@ def _one_app(repo, monkeypatch, tmp_path, sdk_data, app):  # noqa: F811
     codex = Reader(repo, monkeypatch, "codex")
     codex.coordinate("codex")
     codex.notes.unlink()
-    _native_round(codex, f"1. {FIRST}\n")
+    _native_round(codex, f"1. {FIRST}\n", ("more", "the owner wants one more read"))
     assert "reader: codex (gpt-6-sol), a subagent of this Codex session" in codex.text()
     codex.dispose(FIRST, "cut")
     native = _native_round(codex)
@@ -560,16 +588,22 @@ def _spec_diff(repo, monkeypatch, tmp_path, sdk_data, app):  # noqa: F811
     (repo.bin / "claude-says.md").write_text(f"1. {FIRST}\n", encoding="utf-8")
     assert repo.forge("read", "BASKET").returncode == 0
 
-    def next_round(finding: str) -> str:
+    def next_round(finding: str, resolve=None) -> str:
         text = notes.read_text("utf-8")
         notes.write_text(text.replace(finding, f"{finding}\n   Disposition: cut"), encoding="utf-8")
         read = repo.forge("read", "BASKET")
-        assert read.returncode == 0, read.stdout + read.stderr
+        if resolve is None:
+            assert read.returncode == 0, read.stdout + read.stderr
+        else:
+            assert read.returncode == 1 and "asks the owner" in read.stderr, read.stdout + read.stderr
+            choice, reason = resolve
+            resolved = repo.forge("read", "BASKET", "--resolve", choice, "--reason", reason)
+            assert resolved.returncode == 0, resolved.stdout + resolved.stderr
         return json.loads(calls.read_text("utf-8").splitlines()[-1])["prompt"]
 
     confirm("A saved basket gets lost, and shoppers leave.")
     (repo.bin / "claude-says.md").write_text("2. Leaving is not measured.\n", encoding="utf-8")
-    prompt = next_round(FIRST)
+    prompt = next_round(FIRST, ("more", "the owner wants one more read"))
     assert "-A saved basket gets lost.\n+A saved basket gets lost, and shoppers leave." in prompt
     assert "- BASKET: Recover baskets" not in prompt  # the diff, not the whole spec
     # Unchanged since the last round: an empty spec diff.
