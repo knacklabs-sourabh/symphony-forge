@@ -165,7 +165,8 @@ def _request_build(repo, fix):
 
 
 def _decision(fix, answers, *, customer="Sam Lee, director", via="email",
-              on="2026-09-28", demo="https://demo.example.test", quote=None):
+              on="2026-09-28", demo="https://demo.example.test", quote=None,
+              proof="The design shows the key order flow."):
     design_tree = subprocess.check_output(
         ["git", "rev-parse", "HEAD:docs/design/prototype"], cwd=fix, text=True).strip()
     page = fix / "docs/decisions/0001-client-signoff.md"
@@ -180,8 +181,8 @@ def _decision(fix, answers, *, customer="Sam Lee, director", via="email",
                     "## Consequences\nStories may start.\n\n"
                     "## Signed design\n"
                     f"docs/design/prototype/ ({design_tree})\n\n"
-                    "## Proof\nThe design shows the key order flow.\n\n"
-                    "## Decisions\nThe approved canvas is the source for production stories.\n\n"
+                    + ("## Proof\n" + proof + "\n\n" if proof else "")
+                    + "## Decisions\nThe approved canvas is the source for production stories.\n\n"
                     + (answers if quote is None else quote), encoding="utf-8")
     return page
 

@@ -314,7 +314,7 @@ def stop_question(top: Path, item: str, state: dict[str, Any]) -> str:
 
 
 def instructions(top: Path, item: str, state: dict[str, Any], cfg: dict[str, Any],
-                 base: str, previous: dict[str, Any], tested: str) -> str:
+                 base: str, previous: dict[str, Any], tested: str, prototype: bool = False) -> str:
     """The plain review instructions for this task or fix, from templates/review.md."""
     from forge import story, worker  # story imports review indirectly
     design_text = ""
@@ -369,7 +369,9 @@ def instructions(top: Path, item: str, state: dict[str, Any], cfg: dict[str, Any
     if user_facing:
         values["theme_file"] = " (`apps/web/src/index.css`)" if (top / "apps/web/src/index.css").is_file() else ""
         chosen.append("design-theme")
-    prompt = "\n\n".join(blocks[name].substitute(values) for name in chosen)
+    prompt = (string.Template((Path(__file__).parent / "templates" / "review-light.md").read_text(
+        encoding="utf-8")).substitute(values) if prototype else
+        "\n\n".join(blocks[name].substitute(values) for name in chosen))
     if previous.get("commit"):
         prompt += "\n\n" + blocks["repair-review"].substitute(
             reviewed=previous["commit"], findings=_previous(previous))
@@ -435,6 +437,10 @@ def test_run(top: Path, command: str, base: str, *, always: bool = False,
     start, clock = repo.now(), time.monotonic()
     outcome = "skipped"
     results = results_path(top)
+    receipt = {}
+    if results.is_file():
+        with contextlib.suppress(ValueError):
+            receipt = json.loads(results.read_text("utf-8").partition("\n")[0].removeprefix("# "))
     # Close empties the results once, before the command; each pytest in it only appends.
     results.unlink(missing_ok=True)
     try:
@@ -444,15 +450,17 @@ def test_run(top: Path, command: str, base: str, *, always: bool = False,
         if not always and docs_only(top, base):
             said = DOCS_ONLY.format(command=command)
             return 0, said
-        from forge import codex  # imports review indirectly
+        from forge import codex, records  # import review indirectly
 
         passed = None if always else passed_record(top, command)
         skipped = SKIPPED.format(command=command)
         if passed and passed.exists():
+            results.write_text(passed.read_text("utf-8"), "utf-8")
             return 0, skipped
         entry = machine.join("test", top, item, None, None, small=few_tests(top, command, base))
         try:
             if passed and passed.exists():  # the close this one waited for passed the same files
+                results.write_text(passed.read_text("utf-8"), "utf-8")
                 return 0, skipped
             from forge import fasttest
 
@@ -481,6 +489,9 @@ def test_run(top: Path, command: str, base: str, *, always: bool = False,
             elif not closing:
                 env["FORGE_WORKER_TESTS"] = "1"
             with repo.record_run(top, item, "test") as ran:
+                # Worker tests establish the product; close keeps that binding if it still fits.
+                product = (records.tested_product(top, clean=True) if not closing else
+                           receipt.get("product", "") if isinstance(receipt, dict) else "")
                 log = repo.forge_dir(top) / f"test-{ran['run_id']}.log"
                 entry.update(output_path=log.as_posix(), test_cpus=int(workers))
                 with log.open("w", encoding="utf-8") as sink, subprocess.Popen(
@@ -533,6 +544,10 @@ def test_run(top: Path, command: str, base: str, *, always: bool = False,
                             process.wait()
                         raise
                 outcome = ran["outcome"] = "passed" if done.returncode == 0 else "failed"
+            if product and product == records.tested_product(top):
+                evidence = results.read_text("utf-8") if results.is_file() else done.stdout
+                results.write_text("# " + json.dumps({"product": product, "exit": done.returncode})
+                                   + "\n" + evidence, "utf-8")
             if done.returncode == 0 and passed:
                 passed.parent.mkdir(exist_ok=True)
                 # The run's per-test results, so a close that skips this run still lists them.
@@ -872,8 +887,10 @@ def run(top: Path, item: str, state: dict[str, Any], cfg: dict[str, Any],
         base: str, selected: dict[str, str], previous: dict[str, Any],
         signoff_prompt: str = "", light: bool = False, tested: str = "") -> dict[str, Any]:
     """Review the branch head once, retrying once when a run doesn't finish. Returns the result."""
-    prompt = signoff_prompt or instructions(top, item, state, cfg, base, previous, tested)
-    from forge import records, story  # story imports review indirectly
+    from forge import design, records, story  # story imports review indirectly
+    prototype = (light and not signoff_prompt and state.get("kind") == "fix"
+                 and repo.is_prototype(top, cfg, (base, "HEAD")) and design.working_build(top, base))
+    prompt = signoff_prompt or instructions(top, item, state, cfg, base, previous, tested, prototype)
     block = (Path(__file__).parent / "templates" / "review.md").read_text(encoding="utf-8")
     if rules := story.agents_section(top, "Review rules"):
         own = block.split("<!-- review-rules -->\n", 1)[1].split("\n<!-- ", 1)[0]
@@ -924,8 +941,8 @@ def run(top: Path, item: str, state: dict[str, Any], cfg: dict[str, Any],
         # then create the file afresh ("x" refuses anything still there).
         repo.git("rm", "-r", "-f", "-q", "--ignore-unmatch", "--", STANDARDS, cwd=tree)
         with (tree / STANDARDS).open("x", encoding="utf-8") as page:
-            page.write(prompt + "\n\n" + string.Template(rules).substitute(standards=(
-                Path(__file__).parent / "standards.md").read_text(encoding="utf-8").strip()))
+            page.write(prompt if prototype else prompt + "\n\n" + string.Template(rules).substitute(
+                standards=(Path(__file__).parent / "standards.md").read_text(encoding="utf-8").strip()))
         engine = cfg["tools"]
         if engine == "both":
             engine = "codex" if shutil.which(os.environ.get("CODEX_BIN") or "codex") else "claude"
@@ -934,10 +951,14 @@ def run(top: Path, item: str, state: dict[str, Any], cfg: dict[str, Any],
                 "--max-priority", "P3",  # the P0-only level applies after scoring
                 "--prompt-file", STANDARDS,
                 "--json-output", str(out)]
-        if model := repo.models(cfg, "review", engine):
+        model = repo.models(cfg, "review", engine)
+        if prototype:
+            chosen = repo.models(cfg, "light_review", engine)
+            model = {**model, **chosen, "effort": chosen.get("effort") or "medium"}
+        if model.get("model"):
             argv += ["--model", f"{engine}={model['model']}"]
-            if effort := model.get("effort"):
-                argv += ["--thinking", f"{engine}={effort}"]
+        if effort := model.get("effort"):
+            argv += ["--thinking", f"{engine}={effort}"]
         launcher = _launcher(tmp / "bin", tree, engine)
         if launcher:
             argv += [f"--{engine}-bin", str(launcher)]
@@ -1095,13 +1116,18 @@ def _hide_generated(tree: Path, start: str, head: str) -> str:
 
 def signoff(top: Path, answers: str, evidence: str = "") -> str:
     """Review every tracked product file once, against an empty root, before client acceptance."""
+    from forge import records
+
     skill = (Path(__file__).parent / "templates" / "skill.md").read_text(encoding="utf-8")
     table = re.search(r"^\| Topic \|.*?(?=\n\n)", skill, re.M | re.S)
     block = (Path(__file__).parent / "templates" / "review.md").read_text(encoding="utf-8")
     prompt = string.Template(block.split("<!-- signoff -->\n", 1)[1]).substitute(
         answers=answers, topics=table[0] if table else "")
-    prompt += ("\n\nEach demo step in ## Proof must name a passing test. Report a missing step or test as P1.\n"
-               + evidence)
+    if evidence:
+        prompt += ("\n\n" + evidence + "\n\nCheck every demo workflow step against the brief. "
+                   "Each step must name a passing test. Refuse a missing step, a missing test, "
+                   "or a test without evidence that it passes. The full production proof is due now."
+                   "\n\n## Test results for this product\n" + records.signoff_results(top))
     cfg = repo.config(top)
     return run(top, "client-signoff", {}, cfg, "", {}, {}, signoff_prompt=prompt)["commit"]
 
