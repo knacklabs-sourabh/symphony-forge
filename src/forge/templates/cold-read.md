@@ -85,6 +85,9 @@ loss. Every finding you raise names its line as `Raise: <line>` at the start of 
 
 Prefer one blunt fail-closed rule with one test over listing every case.
 
+In a client app, report a plan whose part has one module query a table another module owns as a
+note titled `Module tables: <the part>`.
+
 Check:
 
 1. Can every part be built without asking? Name each gap and contradiction. Name every function,
