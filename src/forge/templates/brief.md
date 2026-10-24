@@ -349,6 +349,11 @@ a new query on another module's tables.
 For new module calls and events, follow backend.md's "Call a service or send an event" rule.
 Existing code needs no conversion.
 
+In a TypeScript app with zod in a package.json, check each request body and query that you add
+with a zod schema in the shared package, through ZodValidationPipe, and document it from the
+same schema, as the API convention says. Do not add class-validator rules or @ApiProperty to
+request input. Review flags new request input that no zod schema checks.
+
 A plan's cold read passes when no note is at the bar. A note is at the bar when the plan is wrong,
 contradicts itself, or a builder could not act on it. Notes below the bar, or unscored and marked
 `Advisory:`, need no disposition or another round; only notes at the bar need the coordinator to amend
