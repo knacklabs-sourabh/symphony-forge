@@ -60,14 +60,17 @@ def test_3_the_generated_workflow_s_tests_job_still_runs_test(env):
     _, where = env.start_fix()
     assert env.repo.forge("sync", cwd=where).returncode == 0
     workflow = (where / ".github/workflows/forge.yml").read_text("utf-8")
-    assert "logger.py full" in workflow and "logger.py fast" not in workflow
+    assert 'run: "forge test --change"' in workflow
+    assert "logger.py full" not in workflow and "logger.py fast" not in workflow
 
 
 def test_4_doctor_explains_fast_test(env):
     _settings(env, fast=True)
     doctor = env.repo.forge("doctor")
-    assert "close runs fast_test" in doctor.stdout
-    assert "pull request's tests check still runs the full test command" in doctor.stdout
+    assert "change tests use fast_test" in doctor.stdout
+    assert "pull request's tests check runs related tests" in doctor.stdout
+    assert "except for existing pytest-split groups" in doctor.stdout
+    assert "The nightly full run covers the rest" in doctor.stdout
 
 
 def test_5_new_repos_get_fast_test_unset(repo, gh, tmp_path):
@@ -77,8 +80,11 @@ def test_5_new_repos_get_fast_test_unset(repo, gh, tmp_path):
 
 
 def test_6_the_skill_and_the_guide_recommend_fast_test():
+    # CI now selects related tests, while existing pytest-split jobs keep six groups.
     root = Path(__file__).parents[1]
     for rel in ("src/forge/templates/skill.md", "docs/guide.md"):
         text = " ".join((root / rel).read_text("utf-8").split())
         assert "set `fast_test`" in text and "`{base}`" in text, rel
-        assert "runs the full suite" in text, rel
+        assert "related tests" in text and "`forge test --change`" in text, rel
+        assert "pytest-split" in text and "six-group job" in text, rel
+        assert "nightly full run" in text, rel

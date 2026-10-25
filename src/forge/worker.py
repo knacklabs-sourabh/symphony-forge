@@ -48,9 +48,10 @@ TEST_STEPS = {
               "merge base with `origin/<default branch>`, on at most two test processes; a picker "
               "run of five or fewer related test files skips the lane's wait unless the test "
               "command or pytest config has a doctest option. It always runs, including uncommitted "
-              "changes. Then commit any fixes. CI runs the full suite."),
+              "changes. Then commit any fixes. The nightly full run covers the rest."),
     "ci": ("the pull request's CI runs the change's related tests, lint and type checks, so do not "
-           "run them here; run `forge test` only for a test you are writing, to watch it fail."),
+           "run them here; run `forge test` only for a test you are writing, to watch it fail. "
+           "The nightly full run covers the rest."),
 }
 START_HERE = ("Do not read the coordinator guide (the forge skill's `SKILL.md`): this brief has "
               "everything a worker needs. Start from the files and tests this brief names, and "
