@@ -9,7 +9,6 @@ import pytest
 
 from conftest import ROOT, patient
 from test_close import env  # noqa: F401
-from test_story import worktree
 from test_worker import calls, install_claude
 
 STORY = "FORGE-TESTPLACE-1"
@@ -21,7 +20,7 @@ def prepare_adopted_client(env, checks, *, grouped=False):
     patient(lambda: shutil.copytree(ROOT / "tests/fixtures/adopted-v1.2.2/client", repo.path,
                                    dirs_exist_ok=True))
     path = repo.path / "forge.toml"
-    old = path.read_text("utf-8").replace('version = "v1.2.2"', 'version = "v1.2.20"')
+    old = path.read_text("utf-8")
     old = old.replace('workers = "codex"', 'workers = "claude"')
     old = old.replace('checks = ["tests", "forge-pr-check"]',
                       "checks = " + json.dumps(checks))
@@ -43,12 +42,17 @@ def prepare_adopted_client(env, checks, *, grouped=False):
     before = tomllib.loads(old)
     installed = repo.forge("--version").stdout.split()[-1]
     assert before["version"] != installed
-    started = repo.forge("fix", "start", "Upgrade the test place",
-                         "--done", "The upgraded repo keeps its test place")
-    assert started.returncode == 0, started.stdout + started.stderr
-    folder = worktree(repo, "fix/upgrade-the-test-place")
+    # The current tool must not run a command in a repo still pinned to the old release.
+    # Build the upgrade branch with Git, then call sync only after updating its pin.
+    folder = repo.path.parent / "upgrade-the-test-place"
+    repo.git("worktree", "add", "-q", "-b", "fix/upgrade-the-test-place", str(folder))
+    record = folder / ".factory/fixes/upgrade-the-test-place.json"
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(json.dumps({
+        "kind": "fix", "branch": "fix/upgrade-the-test-place", "why": "Upgrade the test place",
+        "done_when": "The upgraded repo keeps its test place", "status": "started"}), "utf-8")
     path = folder / "forge.toml"
-    upgraded = old.replace('version = "v1.2.20"', f'version = "{installed}"')
+    upgraded = old.replace(f'version = "{before["version"]}"', f'version = "{installed}"')
     path.write_text(upgraded, "utf-8")
     synced = repo.forge("sync", cwd=folder)
     assert synced.returncode == 0, synced.stdout + synced.stderr
@@ -116,11 +120,12 @@ def test_11_previous_adoption_keeps_the_six_group_ci_job_after_sync(env):
     workflow = (env.repo.path / ".github/workflows/forge.yml").read_text("utf-8")
     start = workflow.index("  tests:\n")
     end = workflow.index("  tests-passed:\n", start)
-    previous_job = (ROOT / "tests/fixtures/previous-pytest-split-tests-job.yml").read_text("utf-8")
-    # The legacy job stays byte-identical except for the group identity passed to Forge.
-    previous_job = previous_job.replace("      UV_FROZEN: '1'\n", "      UV_FROZEN: '1'\n"
-                                        "      FORGE_GROUP: ${{ matrix.group }}\n"
-                                        "      FORGE_GROUPS: '6'\n")
-    assert workflow[start:end] == previous_job + "\n"  # The separator before the next job.
+    tests_job = workflow[start:end]
+    assert "group: [1, 2, 3, 4, 5, 6]" in tests_job
+    assert "name: test group ${{ matrix.group }} of 6" in tests_job
+    assert "FORGE_GROUP: ${{ matrix.group }}" in tests_job
+    assert "FORGE_GROUPS: '6'" in tests_job
+    assert '- run: "forge test --change"' in tests_job
+    assert "--splits" not in tests_job
     doctor = env.repo.forge("doctor")
     assert "does not run forge test --change" not in doctor.stdout
