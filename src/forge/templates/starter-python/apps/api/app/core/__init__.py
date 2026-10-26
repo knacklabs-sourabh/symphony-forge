@@ -1,5 +1,10 @@
 from app.core.admin import admin_only
-from app.core.config import Settings, load_admin_credentials, load_settings
+from app.core.config import (
+    DEFAULT_CURRENCY,
+    Settings,
+    load_admin_credentials,
+    load_settings,
+)
 from app.core.csv import CsvColumn, csv_response, utc_date_time
 from app.core.database import Base, create_database, get_db
 from app.core.envelope import ErrorEnvelope, SuccessEnvelope
@@ -12,6 +17,7 @@ from app.core.schema import HealthResponse
 from app.core.security import install_security_middleware, verify_csrf
 
 __all__ = [
+    "DEFAULT_CURRENCY",
     "AccountPrincipal",
     "ApiError",
     "Base",
