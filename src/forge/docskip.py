@@ -6,6 +6,20 @@ import subprocess
 from pathlib import Path
 
 
+def test_readers(files: list[Path], picked: set[Path]) -> set[Path]:
+    """Keep every text reference, including plugin strings and scoped conftest users."""
+    texts = {path: path.read_text("utf-8-sig") for path in files}
+    while True:
+        names = {path.stem for path in picked}
+        fixtures = [path.parent for path in picked if path.name == "conftest.py"]
+        expanded = picked | {path for path, text in texts.items()
+                             if any(name in text for name in names)
+                             or any(path.is_relative_to(folder) for folder in fixtures)}
+        if expanded == picked:
+            return picked
+        picked = expanded
+
+
 def only_docs(top: Path, base: str, excludes: list[str], *, allow_settings: bool = False,
               head: str = "HEAD") -> bool:
     """Generated files and inputs read by code always need the full checks."""

@@ -1,4 +1,5 @@
 """CI may reuse a successful parent workflow for a commit changing only close records."""
+import ast
 import json
 import os
 import re
@@ -15,6 +16,20 @@ import re
 import shutil
 import subprocess
 from pathlib import Path
+
+
+def test_readers(files: list[Path], picked: set[Path]) -> set[Path]:
+    """Keep every text reference, including plugin strings and scoped conftest users."""
+    texts = {path: path.read_text("utf-8-sig") for path in files}
+    while True:
+        names = {path.stem for path in picked}
+        fixtures = [path.parent for path in picked if path.name == "conftest.py"]
+        expanded = picked | {path for path, text in texts.items()
+                             if any(name in text for name in names)
+                             or any(path.is_relative_to(folder) for folder in fixtures)}
+        if expanded == picked:
+            return picked
+        picked = expanded
 
 
 def only_docs(top: Path, base: str, excludes: list[str], *, allow_settings: bool = False,
@@ -76,6 +91,33 @@ def run(*args: str) -> str:
                           capture_output=True, text=True).stdout.strip()
 
 
+def test_files(top: Path, base: str, excludes: list[str], *, head: str = "HEAD") -> tuple[bool, list[str]]:
+    """Narrow CI only for existing Python test files, never shared test inputs."""
+    paths = subprocess.run([shutil.which("git") or "git", "diff", "--name-only", "-z",
+                            "--no-renames", f"{base}...{head}", "--", ".", *excludes],
+                           cwd=top, check=True, capture_output=True, text=True).stdout
+    changed = list(filter(None, paths.split("\0")))
+    if not changed or any(not (Path(name).name.startswith("test_") or name.endswith("_test.py"))
+                          or not name.endswith(".py") or not (top / name).is_file()
+                          for name in changed):
+        return False, []
+    tests = [top / name for name in run("git", "ls-files", "-z").split("\0")
+             if name.endswith(".py") and (Path(name).name.startswith("test_")
+                                          or name.endswith("_test.py")
+                                          or Path(name).name == "conftest.py")
+             and (top / name).is_file()]
+    changed_tests = {top / name for name in changed}
+    if any(test_readers(tests, {path}) != {path} for path in changed_tests):
+        return False, []
+    platform = []
+    for name in changed:
+        tree = ast.parse((top / name).read_text("utf-8-sig"))
+        if any(isinstance(node, ast.Attribute) and ast.unparse(node) == "pytest.mark.platform"
+               for node in ast.walk(tree)):
+            platform.append(name)
+    return True, platform
+
+
 def reuse() -> bool:
     parents = run("git", "rev-list", "--parents", "-n", "1", os.environ["HEAD_SHA"]).split()
     if len(parents) != 2:
@@ -122,22 +164,28 @@ def reuse() -> bool:
 
 
 docs_only = False
+tests_only, platform_files = False, []
 records_only = "--records-only" in sys.argv[1:]
 try:
     # Sync copies close's classifier and supplies its Git path exclusions.
     if not records_only and os.environ.get("BASE_SHA") and os.environ.get("DOCS_ONLY_EXCLUDES"):
+        tests_only, platform_files = test_files(Path.cwd(), os.environ["BASE_SHA"],
+                                                json.loads(os.environ["DOCS_ONLY_EXCLUDES"]))
         docs_only = only_docs(Path.cwd(), os.environ["BASE_SHA"],
                               json.loads(os.environ["DOCS_ONLY_EXCLUDES"]))
     if records_only:
         passed = os.environ.get("GITHUB_EVENT_NAME") in {"push", "pull_request"} and reuse()
     else:
         passed = docs_only or reuse()
-except (subprocess.CalledProcessError, ValueError, KeyError, TypeError, OSError):
+except (subprocess.CalledProcessError, ValueError, KeyError, TypeError, OSError, SyntaxError):
     # Missing history, unreadable records or unavailable GitHub proof runs the full suite.
     passed = False
 with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as output:
     output.write(f"{'records_only' if records_only else 'reuse'}={str(passed).lower()}\n")
     if docs_only:
         output.write("docs-only=true\n")
+    output.write(f"test-only={str(tests_only).lower()}\n")
+    output.write(f"platform-files={json.dumps(platform_files)}\n")
+    output.write(f"run-windows={str(not tests_only or bool(platform_files)).lower()}\n")
 print("docs only: tests skipped" if docs_only else
       "Parent tests passed; only the close record changed." if passed else "Run the test suite.")
